@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "sourceMap": true,
+    "moduleResolution": "node",
+    "skipLibCheck": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "baseUrl": ".",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "allowJs": true,
+    "paths": {
+      "@handlers/*": [
+        "./src/handlers/*"
+      ],
+      "@services/*": [
+        "./src/services/*"
+      ],
+      "@shared/*": [
+        "./src/shared/*"
+      ],
+      "@utils/*": [
+        "./src/utils/*"
+      ],
+      "@middlewares/*": [
+        "./src/middlewares/*"
+      ],
+      "/opt/nodejs/layers/*": [
+        "./src/layers/*"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.js"
+  ],
+  "ts-node": {
+    "require": [
+      "tsconfig-paths/register"
+    ]
+  }
+}

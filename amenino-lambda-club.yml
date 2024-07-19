@@ -1,0 +1,1039 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: API amenino Club V2 (Projeto Migracao OSB/SOA - AWS)
+
+## ____________________________ PARAMETERS  __________________________________
+
+Parameters:
+  Auth0CustomAudience:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: URL do Custom Audience do Auth0
+
+  Auth0CustomTokenIssuer:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: URL do Custom Token Issuer do Auth0
+
+  Auth0CustomTokenIssuerAr:
+    Type: "AWS::SSM::Parameter::Value<String>"
+    Description: URL do Custom Token Issuer do Auth0Ar
+
+  DefaultLoggerLevelSSM:
+    Type: String
+    Default: ERROR
+
+  ENV:
+    Type: String
+
+  SubnetIDs:
+    Description: Subnet IDs for lambda
+    Type: AWS::SSM::Parameter::Value<String>
+
+  EnvName:
+    Description: Environment name
+    Type: String
+
+  GetReservationMadeLayerSSM:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: Path da version da GetReservationMadeLayer
+
+  ClubLayerSSM:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: Path da version da ClubLayer
+
+## ___________________________ CONDITIONS  ____________________________________
+
+Conditions:
+  isItProd: !Or
+    - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], blue]
+    - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], green]
+    - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], prd]
+  isItDev:
+    !Or
+      - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], dev1]
+      - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], dev2]
+      - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], dev3]
+      - !Equals [!Select [1, !Split ["-", !Ref "AWS::StackName"]], dev4]
+  isItDevAccount:
+    !Equals [ !Ref "AWS::AccountId", "181591766834" ]
+
+## _____________________ GLOBALS  __________________________
+
+Globals:
+  Function:
+    Tracing: Active
+    MemorySize: 256
+    Timeout: 30
+    Layers:
+    - !Ref RuntimeDependenciesLayer
+    Runtime: nodejs20.x
+    VpcConfig:
+      SecurityGroupIds:
+        - !Sub
+          - '{{resolve:ssm:${env}-lambda-security-group-id}}'
+          - {env: !Select [1, !Split ["-", Ref: "AWS::StackName"]]}
+      SubnetIds:
+        !Split [",", !Ref SubnetIDs]
+    Environment:
+      Variables:
+        NODE_TLS_REJECT_UNAUTHORIZED: 0
+        LOGGER_LEVEL: !If [isItProd, !Ref DefaultLoggerLevelSSM, "DEBUG"]
+        ENV: !Ref ENV
+        ENV_VERSION: !FindInMap [ versions, propertiesInfra, version ]
+        ENV_NAME: !Select [ 1, !Split [ "-", !Ref "AWS::StackName" ] ]
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+        INFRA_TABLE:
+          Fn::ImportValue:
+            Fn::Join: [ "-", [ Ref: "AWS::StackName", "infra", "table" ] ]
+
+## ____________________________ MAPPINGS ____________________________________
+
+Mappings:
+  versions:
+    propertiesInfra:
+      version: 0.38.0
+
+## ____________________________ RESOURCES ____________________________________
+
+Resources:
+  RuntimeDependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      Description: Runtime dependencies for Lambdas
+      ContentUri: ./
+      CompatibleRuntimes:
+      - nodejs20.x
+      RetentionPolicy: Retain
+
+  ameninoClubHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      AccessLogSettings:
+        DestinationArn: !Sub ${ameninoClubHttpApiLogGroup.Arn}
+        Format: "$context.requestId | $context.error.message | $context.integrationErrorMessage | $context.authorizer.error"
+      StageName: LIVE
+      DefinitionBody:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: openapi.yaml
+
+  ameninoClubHttpApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/vendedlogs/${ameninoClubHttpApi}
+      RetentionInDays: 30
+
+  ameninoClubApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Join ["-", [Ref: "AWS::StackName", "private-api"]]
+      AccessLogSetting:
+        DestinationArn: !Sub ${ameninoClubHttpApiLogGroup.Arn}
+        Format: "$context.requestId | $context.error.message | $context.integrationErrorMessage | $context.authorizer.error | $context.identity.sourceIp"
+      StageName: LIVE
+      EndpointConfiguration: REGIONAL
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: Allow
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource:
+                - "execute-api:/*/*/*"
+            - Effect: Deny
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource:
+                - "execute-api:/*/*/*"
+              Condition:
+                NotIpAddress:
+                  aws:SourceIp:
+                    - "54.86.74.29"
+                    - "187.72.92.193"
+                    - "54.83.206.200"
+                    - "23.22.250.60" # natgateway dev-account
+                    - "34.198.203.140" # natgateway dev-account
+                    - "44.196.86.7" # natgateway dev-account
+                    - "44.194.35.253" # natgateway dev-account
+                    - "52.70.14.181" # ip openvpn dev-account
+                    - "52.44.216.117"
+                    - "34.194.166.31"
+
+  BasePathMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      DomainName:
+        Fn::ImportValue:
+          Fn::Join:
+          - "-"
+          - - cfstack
+            - !Select [1, !Split ["-", Ref: "AWS::StackName"]]
+            - amenino-api-domains-cf-infra
+            - CustomDomainBr
+      ApiId: !Ref ameninoClubHttpApi
+      Stage: !Ref ameninoClubHttpApi.Stage
+      ApiMappingKey: "cs/plan"
+
+  BasePathMappingRest:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      DomainName:
+        Fn::ImportValue:
+          Fn::Join:
+          - "-"
+          - - cfstack
+            - !Select [1, !Split ["-", Ref: "AWS::StackName"]]
+            - amenino-api-domains-cf-infra
+            - CustomDomainBr
+      ApiId: !Ref ameninoClubApi
+      Stage: !Ref ameninoClubApi.Stage
+      ApiMappingKey: "cs/plan/soap"
+
+  ListPendingPayments:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: "AWS::StackName"
+          - ListPendingPayments
+      Handler: dist/handlers/listPendingPayments.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /payments/pending
+            Method: get
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ListPendingPaymentsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ListPendingPayments}
+      RetentionInDays: 30
+
+  ListPendingPaymentsToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ListPendingPaymentsToSF
+      Handler: dist/handlers/listPendingPaymentsToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ListPendingPaymentsToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ListPendingPaymentsToSF}
+      RetentionInDays: 30
+
+  ListBonus:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ListBonus
+      Handler: dist/handlers/listBonus.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /listbonus
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+
+  ListBonusLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ListBonus}
+      RetentionInDays: 30
+
+  GetBonusVipBenefit:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - GetBonusVipBenefit
+      Handler: dist/handlers/getBonusVipBenefit.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /bonusvip
+            Method: get
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  GetBonusVipBenefitLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${GetBonusVipBenefit}
+      RetentionInDays: 30
+
+  PreUpgrade:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - PreUpgrade
+      Handler: dist/handlers/preUpgrade.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /preupgrade
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  PreUpgradeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${PreUpgrade}
+      RetentionInDays: 30
+
+  ChangeMemberPlan:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ChangeMemberPlan
+      Handler: dist/handlers/changeMemberPlan.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /changememberplan
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ChangeMemberPlanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ChangeMemberPlan}
+      RetentionInDays: 30
+
+  ChangeMemberPlanToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ChangeMemberPlanToSF
+      Handler: dist/handlers/changeMemberPlanToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ChangeMemberPlanToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ChangeMemberPlanToSF}
+      RetentionInDays: 30
+
+  RegisterOffers:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - RegisterOffers
+      Handler: dist/handlers/registerOffers.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /offers
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  RegisterOffersLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${RegisterOffers}
+      RetentionInDays: 30
+
+  GetMemberPlan:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: "AWS::StackName"
+          - GetMemberPlan
+      Handler: dist/handlers/getMemberPlan.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /plans/details
+            Method: get
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  GetMemberPlanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${GetMemberPlan}
+      RetentionInDays: 30
+
+  GetMemberPlanToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: "AWS::StackName"
+          - GetMemberPlanToSF
+      Handler: dist/handlers/getMemberPlanToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  GetMemberPlanToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${GetMemberPlanToSF}
+      RetentionInDays: 30
+
+  CancelPlan:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - CancelPlan
+      Handler: dist/handlers/cancelPlan.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /plans/cancel
+            Method: delete
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  CancelPlanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${CancelPlan}
+      RetentionInDays: 30
+
+  CancelPlanToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - CancelPlanToSF
+      Handler: dist/handlers/cancelPlanToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  CancelPlanToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${CancelPlanToSF}
+      RetentionInDays: 30
+
+  CancelOperation:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - CancelOperation
+      Handler: dist/handlers/cancelOperation.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /cancel/operation
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  CancelOperationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${CancelOperation}
+      RetentionInDays: 30
+
+  CancelOperationToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - CancelOperationToSF
+      Handler: dist/handlers/cancelOperationToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  CancelOperationToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${CancelOperationToSF}
+      RetentionInDays: 30
+
+  ConfirmBonusVipOptin:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ConfirmBonusVipOptin
+      Handler: dist/handlers/confirmBonusVipOptin.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /bonusvip/confirm-optin
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+
+  ConfirmBonusVipOptinLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ConfirmBonusVipOptin}
+      RetentionInDays: 30
+
+  MarkAutomaticRenew:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - MarkAutomaticRenew
+      Handler: dist/handlers/markAutomaticRenew.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /mark-automatic-renew
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+
+  MarkAutomaticRenewLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${MarkAutomaticRenew}
+      RetentionInDays: 30
+
+  PreCancel:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: "AWS::StackName"
+          - PreCancel
+      Handler: dist/handlers/preCancel.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /plans/precancel
+            Method: delete
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  PreCancelLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${PreCancel}
+      RetentionInDays: 30
+
+  SearchAvailablePlan:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: "AWS::StackName"
+          - SearchAvailablePlan
+      Handler: dist/handlers/searchAvailablePlan.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /plans/available
+            Method: get
+            ApiId: !Ref ameninoClubHttpApi
+        HttpApiNoMember:
+          Type: HttpApi
+          Properties:
+            Path: /plans/available/no-member
+            Method: get
+            ApiId: !Ref ameninoClubHttpApi
+
+  SearchAvailablePlanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SearchAvailablePlan}
+      RetentionInDays: 30
+
+  SearchRelatedPlan:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: "AWS::StackName"
+          - SearchRelatedPlan
+      Handler: dist/handlers/searchRelatedPlan.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /plans/related
+            Method: get
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  SearchRelatedPlanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SearchRelatedPlan}
+      RetentionInDays: 30
+
+  ValidateOperation:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ValidateOperation
+      Handler: dist/handlers/validateOperation.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /validate/operation
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ValidateOperationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ValidateOperation}
+      RetentionInDays: 30
+
+  GetAccumulatedBenefits:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: AWS::StackName
+          - GetAccumulatedBenefits
+      Handler: dist/handlers/getMemberAccumulatedBenefits.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /plans/accumulatedbenefits
+            Method: get
+            ApiId: !Ref ameninoClubHttpApi
+
+  GetAccumulatedBenefitsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${GetAccumulatedBenefits}
+      RetentionInDays: 30
+
+  ClubSOAP:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - "-"
+        - - Ref: "AWS::StackName"
+          - ClubSOAP
+      Handler: dist/handlers/clubSoap.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        RestApi:
+          Type: Api
+          Properties:
+            Path: /clubplan
+            Method: post
+            RestApiId: !Ref ameninoClubApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ClubSOAPLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ClubSOAP}
+      RetentionInDays: 30
+
+  cancelImmediately:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-cancelImmediately
+      Handler: dist/handlers/handlerCancelImmediately.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      VpcConfig:
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Join:
+                - "-"
+                - - cfstack
+                  - !Select [1, !Split ["-", Ref: "AWS::StackName"]]
+                  - amenino-cf-resources-infra-LambdaSecurityGroup
+        SubnetIds:
+          Fn::Split:
+            - ","
+            - Fn::ImportValue:
+                Fn::Join:
+                  - "-"
+                  - - cfstack
+                    - !Select [1, !Split ["-", Ref: "AWS::StackName"]]
+                    - amenino-cf-resources-infra-PrivateSubnets
+      Events:
+        cancelImmediately:
+          Type: HttpApi
+          Properties:
+            Path: /cancelClubImmediately
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+
+  cancelImmediatelyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${cancelImmediately}
+      RetentionInDays: 30
+
+  SignatureClub:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - SignatureClub
+      Handler: dist/handlers/signatureClub.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /signature/club
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  SignatureClubLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SignatureClub}
+      RetentionInDays: 30
+
+  SignatureClubToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - SignatureClubToSF
+      Handler: dist/handlers/signatureClubToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  SignatureClubToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SignatureClubToSF}
+      RetentionInDays: 30
+
+  SignatureAssociation:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - SignatureAssociation
+      Handler: dist/handlers/signatureAssociation.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /signature/association
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  SignatureAssociationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SignatureAssociation}
+      RetentionInDays: 30
+
+  SignatureAssociationToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - SignatureAssociationToSF
+      Handler: dist/handlers/signatureAssociationToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  SignatureAssociationToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SignatureAssociationToSF}
+      RetentionInDays: 30
+
+  ClubUpdate:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ClubUpdate
+      Handler: dist/handlers/clubUpdate.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /club/update
+            Method: post
+            ApiId: !Ref ameninoClubHttpApi
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ClubUpdateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ClubUpdate}
+      RetentionInDays: 30
+
+  ClubUpdateToSF:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName:
+        Fn::Join:
+          - "-"
+          - - Ref: "AWS::StackName"
+            - ClubUpdateToSF
+      Handler: dist/handlers/clubUpdateToSF.handler
+      Role:
+        Fn::ImportValue:
+          Fn::Join: ["-", [Ref: "AWS::StackName", "infra", "app", "role"]]
+      Layers:
+        - !Ref GetReservationMadeLayerSSM
+        - !Ref ClubLayerSSM
+
+  ClubUpdateToSFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ClubUpdateToSF}
+      RetentionInDays: 30

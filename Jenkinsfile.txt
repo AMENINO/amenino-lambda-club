@@ -1,0 +1,13 @@
+@Library('SmilesCommon@release-nodejs-alpine') _
+
+PipelineLambda([
+    functionDir: "dist",
+    isCloudFormation: false,
+    buildType: "sam-ts",
+    isSam: true,
+    runUnitTest: true,
+    runSpectral: true,
+    runSonar: true,
+    lambdaNodeVersion : "20.11.1",
+    nodeVer: "20.11.1"
+])
