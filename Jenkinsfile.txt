@@ -8,6 +8,6 @@ PipelineLambda([
     runUnitTest: true,
     runSpectral: true,
     runSonar: true,
-    lambdaNodeVersion : "20.11.1",
-    nodeVer: "20.11.1"
+    lambdaNodeVersion: "20.16.0",
+    nodeVer: "20.16.0"
 ])
