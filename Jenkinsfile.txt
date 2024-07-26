@@ -3,7 +3,7 @@
 PipelineLambda([
     functionDir: "dist",
     isCloudFormation: false,
-    buildType: "sam-ts",
+    buildType: "nodejs18-sam-ts",
     isSam: true,
     runUnitTest: true,
     runSpectral: true,
