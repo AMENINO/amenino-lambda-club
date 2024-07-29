@@ -2,9 +2,9 @@
 
 PipelineLambda([
     functionDir: "dist",
-	isCloudFormation: false,
+    isCloudFormation: false,
     buildType: "sam-ts",
-	isSam: true,
+    isSam: true,
     nodeVer: "20.11.1",
     isCloudFormation: true,
     runUnitTest: false,
