@@ -1,12 +1,7 @@
-@Library('SmilesCommon@release-nodejs-alpine') _
-
-PipelineLambda([
-    functionDir: "dist",
-    isCloudFormation: false,
-    buildType: "sam-ts",
-    isSam: true,
-    nodeVer: "20.11.1",
+PipelineLambdaScala([
+    lambdaFunctionDir: "functions",
     isCloudFormation: true,
-    runUnitTest: false,
-    lambdaNodeVersion: "20.11.1"
+    lambdaBuildType: "nodejs18",
+    runUnitTest: true,
+    runSonar: true
 ])
